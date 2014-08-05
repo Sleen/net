@@ -3,6 +3,7 @@
 
 #include <string>
 #include <sstream>
+#include <memory>
 
 // Windows
 #ifdef _WIN32
@@ -33,19 +34,21 @@ public:
 	};
 
 protected:
-	bool writable, readable, peekable;
-	int size;
+	bool writable = false;
+	bool readable = false;
+	bool peekable = false;
+	int size = 0;
 
 	virtual int read(void *buf, int len){
-		throw std::exception("called unimplemented method read()");
+		throw std::logic_error("called unimplemented method read()");
 	}
 
 	virtual bool write(void *data, int len){
-		throw std::exception("called unimplemented method write()");
+		throw std::logic_error("called unimplemented method write()");
 	}
 
 	virtual void peek(int offset, PeekLocation relativeTo){
-		throw std::exception("called unimplemented method peek()");
+		throw std::logic_error("called unimplemented method peek()");
 	}
 
 public:
@@ -63,21 +66,21 @@ public:
 
 	virtual void Peek(int offset, PeekLocation relativeTo){
 		if (!peekable)
-			throw std::exception("Peek() called on a un-peekable stream!");
+			throw std::logic_error("Peek() called on a un-peekable stream!");
 
 		peek(offset, relativeTo);
 	}
 
 	virtual bool Write(void *data, int len){
 		if (!writable)
-			throw std::exception("Write() called on a un-writable stream!");
+			throw std::logic_error("Write() called on a un-writable stream!");
 
 		return write(data, len);
 	}
 
 	int Read(void *buf, int len){
 		if (!readable)
-			throw std::exception("Read() called on a un-readable stream!");
+			throw std::logic_error("Read() called on a un-readable stream!");
 
 		int s = read(buf, len);
 		this->size -= s;
@@ -87,9 +90,11 @@ public:
 
 	std::string ReadToEnd(){
 		if (size<0)
-			throw std::exception("ReadToEnd() called on a un-measurable stream!");
+			throw std::logic_error("ReadToEnd() called on a un-measurable stream!");
 
-		char* buf = new char[size+1];
+		char* buf = new char[size + 1];
+		buf[size] = 0;
+
 		int rest = size;
 		while (rest>0)
 		{
@@ -97,8 +102,6 @@ public:
 			rest -= r;
 		}
 		
-		buf[size] = 0;
-
 		std::string s(buf);
 		delete[] buf;
 
@@ -132,6 +135,7 @@ protected:
 
 	struct sockaddr_in addr;
 	SOCKET m_socket;
+	bool closed = false;
 	
 	Socket(SOCKET _socket, struct sockaddr_in addr){
 		this->addr = addr;
@@ -139,6 +143,35 @@ protected:
 		bind(m_socket, (struct sockaddr *)&addr, sizeof(addr));
 	}
 	
+	bool has_error()
+	{
+#ifdef _WIN32 
+		int err = WSAGetLastError();
+		if (err != WSAEWOULDBLOCK) {
+#else 
+		int err = errno;
+		if (err != EINPROGRESS && err != EAGAIN) {
+#endif 
+			return true;
+		}
+
+		return false;
+	}
+
+	bool send(const char *data, int length){
+		while (length > 0){
+			int r = ::send(m_socket, data, length, 0);
+
+			if (r < 0){
+				return false;
+			}
+
+			length -= r;
+		}
+
+		return true;
+	}
+
 public:
 	Socket(std::string ip, int port) : Socket(inet_addr(ip.c_str()), port){
 		
@@ -155,10 +188,22 @@ public:
 		m_socket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
 	}
 	
+	~Socket(){
+		Close();
+	}
+
+	/**
+	* get the ip address
+	* @return		ip address
+	*/
 	uint32_t GetIp(){
 		return addr.sin_addr.s_addr;
 	}
 
+	/**
+	* get the ip address in string
+	* @return		ip address in string
+	*/
 	std::string GetIpString(){
 		uint32_t ip = addr.sin_addr.s_addr;
 		std::stringstream s;
@@ -166,6 +211,10 @@ public:
 		return s.str();
 	}
 
+	/**
+	 * get the port number
+	 * @return		port number
+	 */
 	int GetPort(){
 		return addr.sin_port;
 	}
@@ -199,11 +248,20 @@ public:
 #endif
 	}
 
+	/**
+	 * start to listen for connection.
+	 * @param		backlog
+	 * @return		whether the operation succeed or not.
+	 */
 	bool Listen(int backlog = 5){
 		return listen(m_socket, backlog) == 0;
 	}
 
-	Socket *Accept(){
+	/**
+	 * waiting for a connection and return it.
+	 * @return		a wrap for the connection
+	 */
+	std::shared_ptr<Socket> Accept(){
 		struct sockaddr_in clientAddr;
 		socklen_t length = sizeof(clientAddr);
 		SOCKET s = accept(m_socket, (struct sockaddr*)&clientAddr, &length);
@@ -212,25 +270,41 @@ public:
 			return nullptr;
 		}
 
-		return new Socket(s, clientAddr);
+		return std::shared_ptr<Socket>(new Socket(s, clientAddr));
 	}
 
-	SocketReadStream* Receive(){
+	/**
+	 * waiting for some message from current connection
+	 * @return		a stream which contains the data we received, 
+	 *				you must read all for it before calling Receive()
+	 *				again.
+	 */
+	std::shared_ptr<SocketReadStream> Receive(){
 		static int len;
 		int r = recv(m_socket, (char*)&len, 4, 0);
 		if (r <= 0)
 			return nullptr;
 		
-		return new SocketReadStream(this, len);
-		//return recv(m_socket, buffer, length, 0);
+		return std::shared_ptr<SocketReadStream>(new SocketReadStream(this, len));
 	}
 
+	/**
+	 * send some data to remote end.
+	 * @param data		pointer to data
+	 * @param length	length of data to send
+	 * @return			whether the operation succeed or not.
+	 */
 	bool Send(const char *data, int length){
-		return send(m_socket, (const char*)&length, 4, 0) == 0
-			&& send(m_socket, data, length, 0) == 0;
+		return send((const char*)&length, 4) && send(data, length);
 	}
 
-	bool Connet(uint32_t ip, int port){
+	/**
+	 * trying to start connection with remote end.
+	 * @param ip		remote ip address
+	 * @param port		remote port number
+	 * @return			whether the operation succeed or not.
+	 */
+	bool Connect(uint32_t ip, int port){
 		struct sockaddr_in serverAddr;
 		serverAddr.sin_family = AF_INET;
 		serverAddr.sin_port = htons(port);
@@ -238,16 +312,51 @@ public:
 		return connect(m_socket, (struct sockaddr*)&serverAddr, sizeof(serverAddr)) == 0;
 	}
 
-	bool Connet(std::string ip, int port){
-		return Connet(inet_addr(ip.c_str()), port);
+	/**
+	* trying to start connection with remote end.
+	* @param ip		remote ip address
+	* @param port		remote port number
+	* @return			whether the operation succeed or not.
+	*/
+	bool Connect(std::string ip, int port){
+		return Connect(inet_addr(ip.c_str()), port);
 	}
 
+	/**
+	 * check if connection is available
+	 * @return			available or not
+	 */
+	bool IsConnected(){
+		if (m_socket == INVALID_SOCKET || closed) {
+			return false;
+		}
+
+		char buf[1];
+		int ret = recv(m_socket, buf, 1, MSG_PEEK);
+
+		if (ret == 0 || (ret < 0 && has_error())) {
+			Close();
+			return false;
+		}
+
+		return true;
+	}
+
+	/**
+	 * close current connection. you don' t need to call this
+	 * method since it will called while destructing.
+	 */
 	void Close(){
+		if (closed)
+			return;
+
 #ifdef _WIN32
 		closesocket(m_socket);
 #else
 		close(m_socket);
 #endif
+
+		closed = true;
 	}
 };
 

@@ -1,5 +1,9 @@
 
 #include <stdint.h>
+#include <stdio.h>
+
+#include <sys/types.h>
+#include <sys/stat.h>
 
 #include <string>
 #include <sstream>
@@ -24,10 +28,10 @@
 #else
 #	error "platform does not be supported !"
 #endif
-
+#undef  min
 class Stream{
 public:
-	enum class PeekLocation{
+	enum class SeekLocation{
 		Begin,
 		Current,
 		End
@@ -36,19 +40,20 @@ public:
 protected:
 	bool writable = false;
 	bool readable = false;
-	bool peekable = false;
+	bool seekable = false;
 	int size = 0;
+	int position = 0;
 
 	virtual int read(void *buf, int len){
 		throw std::logic_error("called unimplemented method read()");
 	}
 
-	virtual bool write(void *data, int len){
+	virtual int write(const void *data, int len){
 		throw std::logic_error("called unimplemented method write()");
 	}
 
-	virtual void peek(int offset, PeekLocation relativeTo){
-		throw std::logic_error("called unimplemented method peek()");
+	virtual int seek(int offset, SeekLocation relativeTo){
+		throw std::logic_error("called unimplemented method seek()");
 	}
 
 public:
@@ -60,56 +65,216 @@ public:
 		return readable;
 	}
 
-	bool IsPeekable(){
-		return peekable;
+	bool IsSeekable(){
+		return seekable;
 	}
 
-	virtual void Peek(int offset, PeekLocation relativeTo){
-		if (!peekable)
-			throw std::logic_error("Peek() called on a un-peekable stream!");
+	virtual int Peek(void *buf, int len){
+		if (!readable)
+			throw std::logic_error("Peek() called on a un-readable stream!");
 
-		peek(offset, relativeTo);
+		if (!seekable)
+			throw std::logic_error("Peek() called on a un-seekable stream!");
+
+		int read_size = Read(buf, len);
+		Seek(-read_size);
+		
+		return read_size;
 	}
 
-	virtual bool Write(void *data, int len){
+	virtual int Seek(int offset, SeekLocation relativeTo = SeekLocation::Current){
+		if (!seekable)
+			throw std::logic_error("Seek() called on a un-seekable stream!");
+
+		int real_offset = seek(offset, relativeTo);
+		position += real_offset;
+
+		return real_offset;
+	}
+
+	virtual int Write(const void *data, int len){
 		if (!writable)
 			throw std::logic_error("Write() called on a un-writable stream!");
 
-		return write(data, len);
+		int s = write(data, len);
+
+		if (seekable){
+			position += s;
+		}
+		else{
+			size -= s;
+		}
+		
+		return s;
 	}
 
-	int Read(void *buf, int len){
+	virtual int Read(void *buf, int len){
 		if (!readable)
 			throw std::logic_error("Read() called on a un-readable stream!");
 
 		int s = read(buf, len);
-		this->size -= s;
-		if (this->size < 0) this->size = 0;
+
+		if (seekable){
+			position += s;
+		}
+		else{
+			size -= s;
+		}
+		
 		return s;
 	}
 
 	std::string ReadToEnd(){
-		if (size<0)
+		if (RestSize() < 0)
 			throw std::logic_error("ReadToEnd() called on a un-measurable stream!");
 
-		char* buf = new char[size + 1];
-		buf[size] = 0;
+		char* buf = new char[RestSize() + 1];
+		char* read_buf = buf;
 
-		int rest = size;
-		while (rest>0)
+		while (RestSize() > 0)
 		{
-			int r = Read(buf + (size - rest), size);
-			rest -= r;
+			read_buf += Read(read_buf, RestSize());
 		}
-		
+
+		read_buf[0] = 0;
+
 		std::string s(buf);
 		delete[] buf;
 
 		return std::move(s);
 	}
 
-	int Size() const{
+	int RestSize() const{
+		return size - position;
+	}
+
+	int TotalSize() const{
 		return size;
+	}
+};
+
+class MemoryStream : public Stream{
+protected:
+	char *buf;
+
+public:
+	MemoryStream(char* buf, int size){
+		this->buf = buf;
+		this->size = size;
+		readable = true;
+		writable = true;
+		seekable = true;
+	}
+
+	MemoryStream(const char* buf, int size){
+		this->buf = const_cast<char*>(buf);
+		this->size = size;
+		readable = true;
+		writable = false;
+		seekable = true;
+	}
+
+	int read(void *buf, int len) override{
+		int read_size = RestSize();
+		if (len < read_size)
+			read_size = len;
+		memcpy(buf, this->buf + position, read_size);
+		return read_size;
+	}
+
+	int write(const void *data, int len) override{
+		int write_size = RestSize();
+		if (len < write_size)
+			write_size = len;
+		memcpy(this->buf + position, buf, write_size);
+		return write_size;
+	}
+
+	int seek(int offset, SeekLocation relativeTo) override{
+		int t = 0;
+		switch (relativeTo)
+		{
+		case Stream::SeekLocation::Begin:
+			t = 0;
+			break;
+		case Stream::SeekLocation::Current:
+			t = position;
+			break;
+		case Stream::SeekLocation::End:
+			t = size;
+			break;
+		}
+
+		t += offset;
+		if (t < 0)
+			t = 0;
+		else if (t > size)
+			t = size;
+
+		return t - position;
+	}
+};
+
+class FileStream : public Stream{
+protected:
+	FILE* file;
+
+public:
+	FileStream(const std::string& file){
+		this->file = fopen(file.c_str(), "rb+");
+
+#ifdef _WIN32
+#	define stat _stat
+#endif
+		struct stat st;
+		if (stat(file.c_str(), &st))
+			size = 0;
+		else
+			size = st.st_size;
+
+		readable = true;
+		writable = true;
+		seekable = true;
+	}
+
+	int read(void *buf, int len) override{
+		return fread(buf, 1, len, file);
+	}
+
+	int write(const void *data, int len) override{
+		return fwrite(data, 1, len, file);
+	}
+
+	int seek(int offset, SeekLocation relativeTo) override{
+		int t = 0;
+		int s = SEEK_CUR;
+
+		switch (relativeTo)
+		{
+		case Stream::SeekLocation::Begin:
+			t = 0;
+			s = SEEK_SET;
+			break;
+		case Stream::SeekLocation::Current:
+			t = position;
+			s = SEEK_CUR;
+			break;
+		case Stream::SeekLocation::End:
+			t = size;
+			s = SEEK_END;
+			break;
+		}
+
+		t += offset;
+		if (t < 0)
+			t = 0;
+		else if (t > size)
+			t = size;
+
+		if (fseek(file, offset, s) != 0)
+			t = position;
+
+		return t - position;
 	}
 };
 

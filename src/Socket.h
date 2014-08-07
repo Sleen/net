@@ -57,6 +57,10 @@ protected:
 	}
 
 public:
+	virtual ~Stream(){
+		Close();
+	}
+
 	bool IsWritable(){
 		return writable;
 	}
@@ -123,6 +127,10 @@ public:
 		
 		return s;
 	}
+	
+	virtual void Close(){
+
+	}
 
 	std::string ReadToEnd(){
 		if (RestSize() < 0)
@@ -156,23 +164,6 @@ public:
 class MemoryStream : public Stream{
 protected:
 	char *buf;
-
-public:
-	MemoryStream(char* buf, int size){
-		this->buf = buf;
-		this->size = size;
-		readable = true;
-		writable = true;
-		seekable = true;
-	}
-
-	MemoryStream(const char* buf, int size){
-		this->buf = const_cast<char*>(buf);
-		this->size = size;
-		readable = true;
-		writable = false;
-		seekable = true;
-	}
 
 	int read(void *buf, int len) override{
 		int read_size = RestSize();
@@ -213,30 +204,30 @@ public:
 
 		return t - position;
 	}
-};
-
-class FileStream : public Stream{
-protected:
-	FILE* file;
 
 public:
-	FileStream(const std::string& file){
-		this->file = fopen(file.c_str(), "rb+");
-
-#ifdef _WIN32
-#	define stat _stat
-#endif
-		struct stat st;
-		if (stat(file.c_str(), &st))
-			size = 0;
-		else
-			size = st.st_size;
-
+	MemoryStream(char* buf, int size){
+		this->buf = buf;
+		this->size = size;
 		readable = true;
 		writable = true;
 		seekable = true;
 	}
 
+	MemoryStream(const char* buf, int size){
+		this->buf = const_cast<char*>(buf);
+		this->size = size;
+		readable = true;
+		writable = false;
+		seekable = true;
+	}
+
+};
+
+class FileStream : public Stream{
+protected:
+	FILE* file;
+	
 	int read(void *buf, int len) override{
 		return fread(buf, 1, len, file);
 	}
@@ -276,6 +267,36 @@ public:
 
 		return t - position;
 	}
+
+public:
+	FileStream(const std::string& file){
+		this->file = fopen(file.c_str(), "rb+");
+
+#ifdef _WIN32
+#	define stat _stat
+#endif
+		struct stat st;
+		if (stat(file.c_str(), &st))
+			size = 0;
+		else
+			size = st.st_size;
+
+		readable = true;
+		writable = true;
+		seekable = true;
+	}
+	
+	virtual ~FileStream() override{
+		Close();
+	}
+
+	virtual void Close() override{
+		if (file != nullptr){
+			fclose(file);
+			file = nullptr;
+		}
+	}
+
 };
 
 class Socket;
@@ -461,6 +482,15 @@ public:
 	 */
 	bool Send(const char *data, int length){
 		return send((const char*)&length, 4) && send(data, length);
+	}
+
+	/**
+	 * send string to remote end.
+	 * @param str		string to send
+	 * @return			whether the operation succeed or not.
+	 */
+	bool Send(const std::string& str){
+		return Send(str.c_str(), str.length());
 	}
 
 	/**

@@ -71,6 +71,9 @@ void client(){
 		return;
 	}
 
+	FileStream fs("E:\\Git\\SE\\src\\core\\Macro.h");
+	client.Send(fs.ReadToEnd());
+
 	cout << "success, now you can send message to server" << endl;
 	string s;
 	while (true){
@@ -79,11 +82,17 @@ void client(){
 		if (s == "*")
 			break;
 
-		if (!client.Send(s.c_str(), s.length())){
+		if (!client.Send(s)){
 			cout << "failed to send" << endl;
 			return;
 		}
 	}
+}
+
+bool exists_file(const char* file){
+	FILE* f = fopen(file, "r");
+	if (f) fclose(f);;
+	return f != NULL;
 }
 
 int main(){
@@ -100,9 +109,70 @@ int main(){
 	assert(ms.Peek(b, 4) == 3);
 	assert(ms.Read(b, 2) == 2);
 	assert(ms.ReadToEnd() == "3");
+	ms = MemoryStream("1234", 4);
+	assert(!ms.IsWritable());
 
-	FileStream fs("E:\\Git\\SE\\src\\core\\Macro.h");
-	cout << fs.ReadToEnd() << endl;
+	const char* path = "E:/test.txt";
+
+	if (exists_file(path))
+		remove(path);
+
+	// readable, seekable
+	FILE* file = fopen(path, "rb");
+	assert(file == nullptr);
+
+	// writable, seekable
+	file = fopen(path, "wb");
+	assert(file != nullptr);
+	assert(fwrite("test", 1, 4, file) == 4);
+	assert(fseek(file, -1, SEEK_CUR) == 0);
+	assert(fread(a, 1, 1, file) == 0);
+	assert(fclose(file) == 0);
+	assert(FileStream(path).ReadToEnd() == "test");
+
+	file = fopen(path, "wb");
+	assert(file != nullptr);
+	assert(fwrite("hehehe", 1, 6, file) == 6);
+	assert(fclose(file) == 0);
+	assert(FileStream(path).ReadToEnd() == "hehehe");
+
+	// writable
+	file = fopen(path, "ab");
+	assert(file != nullptr);
+	assert(fseek(file, -2, SEEK_CUR) == -1);
+	assert(fwrite("test", 1, 4, file) == 4);
+	assert(fclose(file) == 0);
+	assert(FileStream(path).ReadToEnd() == "hehehetest");
+	
+	// readable, writable, seekable
+	file = fopen(path, "rb+");
+	assert(file != nullptr);
+	assert(fwrite("test", 1, 4, file) == 4);
+	assert(fclose(file) == 0);
+	assert(FileStream(path).ReadToEnd() == "testhetest");
+
+	// readable, writable, seekable  (clear)
+	file = fopen(path, "wb+");
+	assert(file != nullptr);
+	assert(fwrite("test", 1, 4, file) == 4);
+	assert(fclose(file) == 0);
+	assert(FileStream(path).ReadToEnd() == "test");
+
+	// readable, writable
+	file = fopen(path, "ab+");
+	assert(file != nullptr);
+	assert(fseek(file, -2, SEEK_CUR) == -1);
+	assert(fread(a, 1, 4, file) == 4);
+	//assert(fwrite("hehe", 1, 4, file) == 4);				// ???
+	assert(MemoryStream(a, 4).ReadToEnd() == "test");
+	assert(fclose(file) == 0);
+	//assert(FileStream(path).ReadToEnd() == "testhehe");	// ???
+
+	file = fopen(path, "wb");
+	assert(fclose(file) == 0);
+	assert(FileStream(path).ReadToEnd() == "");
+
+	assert(remove(path) == 0);
 
 	if(!Socket::Startup()){
 		cout << "failed to startup socket" << endl;
